@@ -146,8 +146,8 @@ async def search(
         raise ProxyMissingRequiredParamError(route="/search", param="search_tool_name")
     try:
         await can_token_call_search_tool(search_tool_name=routed_search_tool_name, valid_token=user_api_key_dict)
-    except Exception as e:
-        verbose_proxy_logger.error("Search tool authorization failed for %s: %s", routed_search_tool_name, e)
+    except ProxyException as e:
+        verbose_proxy_logger.debug("Search tool authorization denied: %s", e.type)
         raise
 
     if "search_tool_name" in data and data["search_tool_name"]:
