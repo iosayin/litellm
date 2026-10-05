@@ -5529,6 +5529,29 @@ async def can_caller_call_search_tool(
     )
 
 
+async def can_token_call_search_tool(search_tool_name: str, valid_token: UserAPIKeyAuth) -> Literal[True]:
+    """`can_caller_call_search_tool` against the proxy's own settings, team cache and database"""
+    from litellm.proxy.proxy_server import general_settings, prisma_client, proxy_logging_obj, user_api_key_cache
+
+    async def _load_team_object() -> LiteLLM_TeamTable | None:
+        if not valid_token.team_id:
+            return None
+        return await get_team_object(
+            team_id=valid_token.team_id,
+            prisma_client=prisma_client,
+            user_api_key_cache=user_api_key_cache,
+            parent_otel_span=valid_token.parent_otel_span,
+            proxy_logging_obj=proxy_logging_obj,
+        )
+
+    return await can_caller_call_search_tool(
+        search_tool_name=search_tool_name,
+        valid_token=valid_token,
+        general_settings=typed_general_settings(general_settings),
+        load_team_object=_load_team_object,
+    )
+
+
 def can_grants_view_search_tool(search_tool_name: str, grants: SearchToolGrants) -> bool:
     try:
         check_search_tool_grants(search_tool_name, grants)

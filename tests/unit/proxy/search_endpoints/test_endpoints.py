@@ -182,3 +182,97 @@ async def test_search_with_only_a_query_falls_back_to_the_proxy_default_model(mo
     router.asearch.assert_awaited_once()
     assert router.asearch.await_args.kwargs["query"] == "litellm"
     assert router.asearch.await_args.kwargs["model"] == "perplexity-search"
+
+
+def _standalone_key(key_search_tools: list[str] | None) -> UserAPIKeyAuth:
+    caller: Final = UserAPIKeyAuth(
+        api_key="sk-standalone",
+        user_role=LitellmUserRoles.INTERNAL_USER,
+        object_permission_id=None if key_search_tools is None else "op-key",
+        object_permission=(
+            None
+            if key_search_tools is None
+            else LiteLLM_ObjectPermissionTable(object_permission_id="op-key", search_tools=key_search_tools)
+        ),
+    )
+    caller.via_virtual_key = True
+    return caller
+
+
+@pytest.mark.parametrize(
+    "general_settings, body",
+    [
+        ({"search_tool_deny_by_default": True}, {"model": "search-a", "query": "what is litellm"}),
+        (
+            {"search_tool_deny_by_default": True, "completion_model": "search-a"},
+            {"query": "what is litellm"},
+        ),
+    ],
+    ids=["body-model", "completion-model"],
+)
+@pytest.mark.parametrize("key_search_tools, expected_status", [(None, 403), (["search-a"], 200)])
+def test_direct_search_authorizes_the_tool_resolved_from_model_settings(
+    monkeypatch, cache, tavily, general_settings, body, key_search_tools, expected_status
+):
+    monkeypatch.setattr(proxy_server, "general_settings", general_settings)
+
+    response: Final = _client(_standalone_key(key_search_tools)).post("/v1/search", json=body)
+
+    assert response.status_code == expected_status, response.text
+    assert tavily.call_count == (1 if expected_status == 200 else 0)
+
+
+@pytest.mark.parametrize(
+    "key_search_tools, expected_status, fallback_calls",
+    [(["search-a"], 500, 0), (["search-a", "search-b"], 200, 1)],
+)
+def test_router_search_fallback_target_must_be_granted(
+    monkeypatch, cache, key_search_tools, expected_status, fallback_calls
+):
+    from litellm.proxy.auth.fallback_model_access import router_fallback_access_check
+
+    monkeypatch.setattr(proxy_server, "general_settings", {"search_tool_deny_by_default": True})
+    monkeypatch.setattr(  # test-quality-ok: respx needs HTTPX enabled to fake the provider HTTP boundary.
+        litellm,
+        "disable_aiohttp_transport",
+        True,
+    )
+    monkeypatch.setattr(
+        proxy_server,
+        "llm_router",
+        Router(
+            model_list=[],
+            search_tools=[
+                {"search_tool_name": "search-a", "litellm_params": {"search_provider": "exa_ai", "api_key": "fake"}},
+                {"search_tool_name": "search-b", "litellm_params": {"search_provider": "tavily", "api_key": "fake"}},
+            ],
+            fallbacks=[{"search-a": ["search-b"]}],
+            fallback_access_check=router_fallback_access_check,
+            num_retries=0,
+        ),
+    )
+    litellm.in_memory_llm_clients_cache.flush_cache()
+    with respx.mock(assert_all_called=False) as mock:
+        failing_tool: Final = mock.post(url__regex=r"https://api\.exa\.ai/.*").respond(500, json={"error": "down"})
+        fallback_tool: Final = mock.post(TAVILY_SEARCH_URL).respond(200, json={"results": [TAVILY_RESULT]})
+        response: Final = _client(_standalone_key(key_search_tools)).post(
+            "/v1/search/search-a", json={"query": "what is litellm"}
+        )
+    litellm.in_memory_llm_clients_cache.flush_cache()
+
+    assert response.status_code == expected_status, response.text
+    assert failing_tool.call_count == 1
+    assert fallback_tool.call_count == fallback_calls
+
+
+def test_direct_search_authorizes_completion_model_over_the_requested_tool_name(monkeypatch, cache, tavily):
+    monkeypatch.setattr(
+        proxy_server, "general_settings", {"search_tool_deny_by_default": True, "completion_model": "search-a"}
+    )
+
+    response: Final = _client(_standalone_key(["search-granted"])).post(
+        "/v1/search", json={"search_tool_name": "search-granted", "query": "what is litellm"}
+    )
+
+    assert response.status_code == 403, response.text
+    assert tavily.call_count == 0

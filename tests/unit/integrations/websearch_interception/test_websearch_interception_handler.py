@@ -1052,3 +1052,37 @@ async def test_execute_search_unregistered_fallback_follows_search_tool_deny_by_
             await logger._execute_search("what is litellm", kwargs=kwargs)
         assert exc_info.value.code == "403"
         mock_asearch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "general_settings, expect_search",
+    [({}, True), ({"search_tool_deny_by_default": True}, False)],
+)
+@pytest.mark.asyncio
+async def test_execute_search_registered_tool_without_provider_follows_unregistered_fallback_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    general_settings: dict[str, bool],
+    expect_search: bool,
+):
+    import litellm
+    from litellm.proxy import proxy_server
+
+    logger = WebSearchInterceptionLogger(enabled_providers=["bedrock"], search_tool_name="no-provider")
+    router = MagicMock()
+    router.search_tools = [{"search_tool_name": "no-provider", "litellm_params": {}}]
+    mock_asearch = AsyncMock(return_value=SearchResponse(object="search", results=[]))
+
+    monkeypatch.setattr(proxy_server, "llm_router", router)
+    monkeypatch.setattr(proxy_server, "general_settings", general_settings)
+    monkeypatch.setattr(proxy_server, "prisma_client", MagicMock())
+    monkeypatch.setattr(litellm, "asearch", mock_asearch)
+    kwargs = {"metadata": {"user_api_key_auth": _virtual_key(key_search_tools=["no-provider"])}}
+
+    if expect_search:
+        await logger._execute_search("what is litellm", kwargs=kwargs)
+        assert mock_asearch.await_args.kwargs["search_provider"] == "perplexity"
+    else:
+        with pytest.raises(ProxyException) as exc_info:
+            await logger._execute_search("what is litellm", kwargs=kwargs)
+        assert exc_info.value.code == "403"
+        mock_asearch.assert_not_awaited()

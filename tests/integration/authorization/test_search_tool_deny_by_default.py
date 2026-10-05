@@ -17,6 +17,7 @@ from pydantic import JsonValue
 PROXY_CONFIG: Final = Path(__file__).resolve().parents[1] / "proxy_config.yaml"
 SEARCH_TOOL: Final = "integration-search"
 OTHER_SEARCH_TOOL: Final = "integration-other-search"
+FAILING_SEARCH_TOOL: Final = "integration-failing-search"
 SEARCH_RESULT: Final = {"title": "Synthetic result", "url": "https://example.test/result", "content": "snippet"}
 JsonObject: TypeAlias = dict[str, JsonValue]
 
@@ -31,6 +32,8 @@ def _grant(*search_tools: str) -> JsonObject:
 
 
 def _respond(request: Request) -> Reply:
+    if (request.method, request.target) == ("POST", "/failing/search"):
+        return Reply(status=500, body=b'{"error": "synthetic outage"}')
     assert (request.method, request.target) == ("POST", "/tavily/search"), request
     query: Final = json.loads(request.body)["query"]
     return Reply(body=json.dumps({"query": query, "results": [SEARCH_RESULT]}).encode())
@@ -43,12 +46,18 @@ def _config(directory: Path, wire: Wire) -> Path:
         "api_key": "synthetic-tavily-key",
         "api_base": f"{wire.url}/tavily",
     }
+    failing_tool_params: Final[JsonObject] = {**tool_params, "api_base": f"{wire.url}/failing"}
     strict: Final[JsonObject] = {
         **config,
         "general_settings": {**object_value(config["general_settings"]), "search_tool_deny_by_default": True},
+        "router_settings": {
+            **object_value(config["router_settings"]),
+            "fallbacks": _json_array({FAILING_SEARCH_TOOL: _json_array(OTHER_SEARCH_TOOL)}),
+        },
         "search_tools": _json_array(
             {"search_tool_name": SEARCH_TOOL, "litellm_params": tool_params},
             {"search_tool_name": OTHER_SEARCH_TOOL, "litellm_params": tool_params},
+            {"search_tool_name": FAILING_SEARCH_TOOL, "litellm_params": failing_tool_params},
         ),
     }
     path: Final = directory / "proxy_search_tool_deny_by_default.yaml"
@@ -176,3 +185,37 @@ def test_revoking_a_team_search_grant_takes_effect_on_the_next_request(strict_se
         assert response.status_code == 403, response.text
         assert response.json()["error"]["type"] == "team_search_tool_access_denied", response.text
         assert _searched(wire, marker) == ()
+
+
+def test_deny_by_default_authorizes_a_search_tool_named_by_the_model_field(strict_search: tuple[Gateway, Wire]) -> None:
+    gateway, wire = strict_search
+    with gateway.scenario() as scenario:
+        key: Final = scenario.key()
+        marker: Final = f"search model field {uuid.uuid4().hex}"
+
+        response: Final = gateway.request("POST", "/v1/search", {"model": SEARCH_TOOL, "query": marker}, key=key)
+
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["type"] == "key_search_tool_access_denied", response.text
+        assert _searched(wire, marker) == ()
+
+
+@pytest.mark.parametrize("fallback_granted", [False, True])
+def test_router_search_fallback_only_reaches_a_granted_tool(
+    strict_search: tuple[Gateway, Wire], fallback_granted: bool
+) -> None:
+    gateway, wire = strict_search
+    with gateway.scenario() as scenario:
+        granted: Final = (FAILING_SEARCH_TOOL, OTHER_SEARCH_TOOL) if fallback_granted else (FAILING_SEARCH_TOOL,)
+        key: Final = scenario.key(object_permission=_grant(*granted))
+        marker: Final = f"search fallback {fallback_granted} {uuid.uuid4().hex}"
+
+        response: Final = gateway.request("POST", f"/v1/search/{FAILING_SEARCH_TOOL}", {"query": marker}, key=key)
+
+        searched: Final = tuple(request.target for request in _searched(wire, marker))
+        if fallback_granted:
+            assert response.status_code == 200, response.text
+            assert searched == ("/failing/search", "/tavily/search")
+        else:
+            assert response.status_code == 500, response.text
+            assert searched == ("/failing/search",)

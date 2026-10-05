@@ -135,46 +135,24 @@ async def search(
     if search_tool_name is not None:
         data["search_tool_name"] = search_tool_name
 
-    if not (
-        data.get("search_tool_name") or data.get("model") or general_settings.get("completion_model") or user_model
-    ):
+    from litellm.proxy.auth.auth_checks import can_token_call_search_tool
+    from litellm.proxy.common_utils.http_parsing_utils import resolve_inference_model
+
+    # the same resolution base_process_llm_request applies, so the grant covers the tool the router runs
+    routed_search_tool_name: Final = resolve_inference_model(
+        data.get("search_tool_name") or data.get("model"), general_settings, user_model
+    )
+    if not isinstance(routed_search_tool_name, str) or not routed_search_tool_name:
         raise ProxyMissingRequiredParamError(route="/search", param="search_tool_name")
+    try:
+        await can_token_call_search_tool(search_tool_name=routed_search_tool_name, valid_token=user_api_key_dict)
+    except Exception as e:
+        verbose_proxy_logger.error("Search tool authorization failed for %s: %s", routed_search_tool_name, e)
+        raise
 
     if "search_tool_name" in data and data["search_tool_name"]:
         data["model"] = data["search_tool_name"]
         search_tool_name_value: Final = data["search_tool_name"]
-
-        from litellm.proxy.auth.auth_checks import (
-            can_caller_call_search_tool,
-            get_team_object,
-            typed_general_settings,
-        )
-        from litellm.proxy.proxy_server import (
-            prisma_client,
-            user_api_key_cache,
-        )
-
-        async def _load_team_object() -> LiteLLM_TeamTable | None:
-            if not user_api_key_dict.team_id:
-                return None
-            return await get_team_object(
-                team_id=user_api_key_dict.team_id,
-                prisma_client=prisma_client,
-                user_api_key_cache=user_api_key_cache,
-                parent_otel_span=user_api_key_dict.parent_otel_span,
-                proxy_logging_obj=proxy_logging_obj,
-            )
-
-        try:
-            await can_caller_call_search_tool(
-                search_tool_name=search_tool_name_value,
-                valid_token=user_api_key_dict,
-                general_settings=typed_general_settings(general_settings),
-                load_team_object=_load_team_object,
-            )
-        except Exception as e:
-            verbose_proxy_logger.error("Search tool authorization failed for %s: %s", search_tool_name_value, e)
-            raise
 
         if llm_router is not None and hasattr(llm_router, "search_tools"):
             verbose_proxy_logger.debug(
