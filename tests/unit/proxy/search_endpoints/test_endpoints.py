@@ -265,14 +265,21 @@ def test_router_search_fallback_target_must_be_granted(
     assert fallback_tool.call_count == fallback_calls
 
 
-def test_direct_search_authorizes_completion_model_over_the_requested_tool_name(monkeypatch, cache, tavily):
+@pytest.mark.parametrize(
+    "requested_tool, completion_model, expected_status",
+    [("search-b", "search-a", 403), ("search-a", "search-b", 200)],
+    ids=["requested-tool-ungranted", "completion-model-ungranted"],
+)
+def test_direct_search_authorizes_the_requested_tool_over_completion_model(
+    monkeypatch, cache, tavily, requested_tool, completion_model, expected_status
+):
     monkeypatch.setattr(
-        proxy_server, "general_settings", {"search_tool_deny_by_default": True, "completion_model": "search-a"}
+        proxy_server, "general_settings", {"search_tool_deny_by_default": True, "completion_model": completion_model}
     )
 
-    response: Final = _client(_standalone_key(["search-granted"])).post(
-        "/v1/search", json={"search_tool_name": "search-granted", "query": "what is litellm"}
+    response: Final = _client(_standalone_key(["search-a"])).post(
+        f"/v1/search/{requested_tool}", json={"query": "what is litellm"}
     )
 
-    assert response.status_code == 403, response.text
-    assert tavily.call_count == 0
+    assert response.status_code == expected_status, response.text
+    assert tavily.call_count == (1 if expected_status == 200 else 0)

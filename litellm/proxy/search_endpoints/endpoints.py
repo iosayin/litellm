@@ -138,9 +138,9 @@ async def search(
     from litellm.proxy.auth.auth_checks import can_token_call_search_tool
     from litellm.proxy.common_utils.http_parsing_utils import resolve_inference_model
 
-    # the same resolution base_process_llm_request applies, so the grant covers the tool the router runs
-    routed_search_tool_name: Final = resolve_inference_model(
-        data.get("search_tool_name") or data.get("model"), general_settings, user_model
+    # the search router dispatches search_tool_name ahead of the model base_process_llm_request resolves
+    routed_search_tool_name: Final = data.get("search_tool_name") or resolve_inference_model(
+        data.get("model"), general_settings, user_model
     )
     if not isinstance(routed_search_tool_name, str) or not routed_search_tool_name:
         raise ProxyMissingRequiredParamError(route="/search", param="search_tool_name")
