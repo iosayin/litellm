@@ -86,21 +86,28 @@ class TestProxyInitializationHelpers:
             mock_stream_response,
         ]
 
-        # Execute
-        with pytest.raises(ValueError, match="Invalid test value"):
-            ProxyInitializationHelpers._run_test_chat_completion(
-                "localhost", 8000, "gpt-3.5-turbo", True
-            )
+        # Execute with True flag (uses http://{host}:{port})
+        ProxyInitializationHelpers._run_test_chat_completion(
+            "localhost", 8000, "gpt-3.5-turbo", True
+        )
+        mock_openai.assert_called_with(
+            api_key="My API Key", base_url="http://localhost:8000"
+        )
 
         # Test with valid string test value
         ProxyInitializationHelpers._run_test_chat_completion(
             "localhost", 8000, "gpt-3.5-turbo", "http://test-url"
         )
-
-        # Assert
-        mock_openai.assert_called_once_with(
+        mock_openai.assert_called_with(
             api_key="My API Key", base_url="http://test-url"
         )
+
+        # Test with invalid test value
+        with pytest.raises(ValueError, match="Invalid test value"):
+            ProxyInitializationHelpers._run_test_chat_completion(
+                "localhost", 8000, "gpt-3.5-turbo", False
+            )
+
         mock_client.chat.completions.create.assert_called()
 
     def test_get_default_unvicorn_init_args(self):

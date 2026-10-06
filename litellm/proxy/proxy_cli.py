@@ -243,9 +243,10 @@ class ProxyInitializationHelpers:
         click.echo(f"\nLiteLLM: Making a test ChatCompletions request to your proxy. Model={request_model}")
         import openai
 
-        api_base = f"http://{host}:{port}"
-        if isinstance(test, str):
+        if isinstance(test, str) and test:
             api_base = test
+        elif test is True:
+            api_base = f"http://{host}:{port}"
         else:
             raise ValueError("Invalid test value")
         client: Final = openai.OpenAI(api_key="My API Key", base_url=api_base)
